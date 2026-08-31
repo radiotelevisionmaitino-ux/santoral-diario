@@ -1,8 +1,6 @@
 import asyncio
 import datetime
 import random
-import re
-import unicodedata
 import requests
 import edge_tts
 
@@ -36,10 +34,6 @@ CIERRES = [
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
 
-def normalizar_texto(texto):
-    """Elimina tildes, caracteres raros y convierte a minúsculas para comparaciones precisas."""
-    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower()
-
 def obtener_texto_dia(fecha):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
@@ -54,88 +48,31 @@ def obtener_texto_dia(fecha):
                 break
             except UnicodeDecodeError:
                 continue
-
         if not text:
             text = content.decode('utf-8', errors='ignore')
 
-        dia_actual = fecha.day
-        dia_siguiente = dia_actual + 1
-        mes_nombre = MESES[fecha.month - 1]
+        # Formato del prefijo exacto en los archivos: [01], [02] ... [31]
+        prefijo = f"[{fecha.day:02d}]"
 
-        lineas = text.splitlines()
-        capturando = False
-        lineas_extraidas = []
-
-        for linea in lineas:
+        for linea in text.splitlines():
             linea_str = linea.strip()
-            if not linea_str:
-                continue
-            
-            norm = normalizar_texto(linea_str)
+            if linea_str.startswith(prefijo):
+                # Elimina el [XX] inicial y devuelve todo el texto del día
+                cuerpo = linea_str[len(prefijo):].strip()
+                return cuerpo
 
-            # Detecta marcas como "DIA 31", "31 DE AGOSTO", "31.", "31.-"
-            es_hoy = (
-                f"dia {dia_actual}" in norm or 
-                f"{dia_actual} de {mes_nombre}" in norm or 
-                re.search(rf"\b{dia_actual}\s*[\.\-\:]", norm) or
-                norm.startswith(f"{dia_actual} ")
-            )
-
-            # Detecta el inicio del día siguiente para detener la lectura
-            es_siguiente = (
-                f"dia {dia_siguiente}" in norm or 
-                f"{dia_siguiente} de {mes_nombre}" in norm or 
-                re.search(rf"\b{dia_siguiente}\s*[\.\-\:]", norm) or
-                norm.startswith(f"{dia_siguiente} ")
-            )
-
-            if capturando:
-                if es_siguiente:
-                    break
-                lineas_extraidas.append(linea_str)
-            else:
-                if es_hoy:
-                    capturando = True
-                    # Extrae el texto tras el número si el titular incluye contenido
-                    sub_linea = re.sub(rf"^(?:D[ÍI]A\s+)?{dia_actual}(?:[A-Z\s]+)?[\.\-\:\s]+", "", linea_str, flags=re.IGNORECASE).strip()
-                    if len(sub_linea) > 10 and not sub_linea.lower().startswith("de "):
-                        lineas_extraidas.append(sub_linea)
-
-        resultado = " ".join(lineas_extraidas).strip()
-        resultado = re.sub(r'\s+', ' ', resultado)
-
-        if len(resultado) > 30:
-            if len(resultado) > 950:
-                resultado = resultado[:950].rsplit('.', 1)[0] + '.'
-            return resultado
-
-        # Fallback de escaneo global si la lectura por líneas no encuentra separadores estándar
-        norm_full = normalizar_texto(text)
-        pat_start = rf"(?:dia\s+{dia_actual}\b|\b{dia_actual}\s+de\s+{mes_nombre}|\b{dia_actual}\s*[\.\-])"
-        m_start = re.search(pat_start, norm_full)
-        if m_start:
-            idx_start = m_start.end()
-            pat_end = rf"(?:dia\s+{dia_siguiente}\b|\b{dia_siguiente}\s+de\s+{mes_nombre}|\b{dia_siguiente}\s*[\.\-])"
-            m_end = re.search(pat_end, norm_full[idx_start:])
-            
-            bloque = text[idx_start : idx_start + m_end.start()] if m_end else text[idx_start : idx_start + 1200]
-            bloque = re.sub(r'\s+', ' ', bloque).strip()
-            
-            if len(bloque) > 30:
-                if len(bloque) > 950:
-                    bloque = bloque[:950].rsplit('.', 1)[0] + '.'
-                return bloque
+        print(f"No se encontró la línea con el prefijo {prefijo}")
 
     except Exception as e:
         print(f"Error procesando el santoral: {e}")
 
-    return f"En este día honramos y recordamos la memoria de los santos y bienaventurados correspondientes a esta jornada."
+    return "Hoy honramos y recordamos la memoria de los santos de esta jornada."
 
 async def generar_audio(texto, archivo_salida="santoral-hoy.mp3"):
     try:
         communicate = edge_tts.Communicate(texto, "es-ES-AlvaroNeural")
         await communicate.save(archivo_salida)
-        print("Audio MP3 generado con éxito.")
+        print("Audio MP3 generado correctamente.")
     except Exception as e:
         print(f"Error en voz Edge-TTS: {e}")
 
@@ -212,7 +149,7 @@ def main():
 
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html)
-    print("index.html actualizado.")
+    print("index.html generado correctamente.")
 
 if __name__ == "__main__":
     main()
