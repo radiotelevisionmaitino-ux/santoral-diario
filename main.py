@@ -5,19 +5,20 @@ import re
 import requests
 import edge_tts
 
+# URLs directas canónicas (sin nodos de servidor caducos)
 MONTH_URLS = {
-    1: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20ENERO.txt",
-    2: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20FEBRERO.txt",
-    3: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20MARZO.txt",
-    4: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20ABRIL.txt",
-    5: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20MAYO.txt",
-    6: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20JUNIO.txt",
-    7: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20JULIO.txt",
-    8: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20AGOSTO.txt",
-    9: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20SEPTIEMBRE.txt",
-    10: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20OCTUBRE.txt",
-    11: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20NOVIEMBRE.txt",
-    12: "https://ia600400.us.archive.org/2/items/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20DICIEMBRE.txt",
+    1: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20ENERO.txt",
+    2: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20FEBRERO.txt",
+    3: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20MARZO.txt",
+    4: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20ABRIL.txt",
+    5: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20MAYO.txt",
+    6: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20JUNIO.txt",
+    7: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20JULIO.txt",
+    8: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20AGOSTO.txt",
+    9: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20SEPTIEMBRE.txt",
+    10: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20OCTUBRE.txt",
+    11: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20NOVIEMBRE.txt",
+    12: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20DICIEMBRE.txt",
 }
 
 INTROS = [
@@ -36,20 +37,25 @@ DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "doming
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
 
 def obtener_texto_dia(fecha):
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
         url = MONTH_URLS[fecha.month]
-        resp = requests.get(url, timeout=15)
-        resp.encoding = resp.apparent_encoding or 'utf-8'
+        resp = requests.get(url, headers=headers, timeout=20)
+        resp.raise_for_status()
+        
+        # Detectar codificación correcta para evitar caracteres extraños
+        resp.encoding = resp.apparent_encoding if resp.apparent_encoding else 'latin-1'
         text = resp.text
 
         dia = fecha.day
         mes_nombre = MESES[fecha.month - 1]
 
-        # Búsqueda ultra flexible de marcas de día (ej: DÍA 31, 31 DE AGOSTO, 31.)
+        # Expresiones regulares adaptadas a las variantes del archivo de texto
         patrones_dia = [
             rf"D[ÍI]A\s+{dia}\b",
             rf"\b{dia}\s+DE\s+{mes_nombre}\b",
-            rf"\b{dia}\s*\.\s*",
+            rf"\b{dia}\s*\.\s*-",
+            rf"\b{dia}\s*\.",
             rf"^\s*{dia}\b"
         ]
 
@@ -61,18 +67,20 @@ def obtener_texto_dia(fecha):
                 break
 
         if inc is None:
-            return f"En este día celebramos de manera especial las festividades y santos de esta jornada."
+            print(f"No se encontró la marca del día {dia} en el texto.")
+            return f"Hoy celebramos las festividades de los santos correspondientes a este día {dia} de {mes_nombre}."
 
-        # Delimitar hasta el día siguiente (si existe)
+        # Buscar el inicio del día siguiente (si no es fin de mes)
+        fin = None
         sig_dia = dia + 1
         patrones_sig = [
             rf"D[ÍI]A\s+{sig_dia}\b",
             rf"\b{sig_dia}\s+DE\s+{mes_nombre}\b",
-            rf"\b{sig_dia}\s*\.\s*",
+            rf"\b{sig_dia}\s*\.\s*-",
+            rf"\b{sig_dia}\s*\.",
             rf"^\s*{sig_dia}\b"
         ]
 
-        fin = None
         for pat in patrones_sig:
             m_sig = re.search(pat, text[inc:], re.IGNORECASE | re.MULTILINE)
             if m_sig:
@@ -82,22 +90,23 @@ def obtener_texto_dia(fecha):
         cuerpo = text[inc:fin].strip() if fin else text[inc:].strip()
         cuerpo = re.sub(r'\s+', ' ', cuerpo)
 
-        # Cortar en el último punto si el texto del día fuese excesivamente largo para radio
-        if len(cuerpo) > 900:
-            cuerpo = cuerpo[:900].rsplit('.', 1)[0] + '.'
+        # Ajuste de longitud para radio si el bloque es muy extenso
+        if len(cuerpo) > 1000:
+            cuerpo = cuerpo[:1000].rsplit('.', 1)[0] + '.'
 
-        return cuerpo if len(cuerpo) > 15 else f"Hoy honramos la memoria de los santos y bienaventurados correspondientes a esta fecha."
+        return cuerpo if len(cuerpo) > 20 else f"Hoy honramos la memoria de los santos y bienaventurados del día."
+
     except Exception as e:
-        print(f"Error recuperando texto: {e}")
+        print(f"Error descargando o procesando el santoral: {e}")
         return "Hoy honramos y recordamos la memoria de los santos de esta jornada."
 
 async def generar_audio(texto, archivo_salida="santoral-hoy.mp3"):
     try:
         communicate = edge_tts.Communicate(texto, "es-ES-AlvaroNeural")
         await communicate.save(archivo_salida)
-        print("Audio generado correctamente.")
+        print("Audio MP3 generado con éxito.")
     except Exception as e:
-        print(f"Error generando MP3: {e}")
+        print(f"Error en voz Edge-TTS: {e}")
 
 def main():
     hoy = datetime.date.today()
@@ -172,7 +181,7 @@ def main():
 
     with open("index.html", "w", encoding="utf-8") as f:
         f.write(html)
-    print("index.html generado correctamente.")
+    print("index.html actualizado.")
 
 if __name__ == "__main__":
     main()
