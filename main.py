@@ -2,10 +2,10 @@ import asyncio
 import datetime
 import random
 import re
+import unicodedata
 import requests
 import edge_tts
 
-# URLs directas canónicas (sin nodos de servidor caducos)
 MONTH_URLS = {
     1: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20ENERO.txt",
     2: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20FEBRERO.txt",
@@ -36,69 +36,100 @@ CIERRES = [
 DIAS = ["lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"]
 MESES = ["enero", "febrero", "marzo", "abril", "mayo", "junio", "julio", "agosto", "septiembre", "octubre", "noviembre", "diciembre"]
 
+def normalizar_texto(texto):
+    """Elimina tildes, caracteres raros y convierte a minúsculas para comparaciones precisas."""
+    return ''.join(c for c in unicodedata.normalize('NFD', texto) if unicodedata.category(c) != 'Mn').lower()
+
 def obtener_texto_dia(fecha):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     try:
         url = MONTH_URLS[fecha.month]
         resp = requests.get(url, headers=headers, timeout=20)
-        resp.raise_for_status()
         
-        # Detectar codificación correcta para evitar caracteres extraños
-        resp.encoding = resp.apparent_encoding if resp.apparent_encoding else 'latin-1'
-        text = resp.text
+        content = resp.content
+        text = ""
+        for enc in ['utf-8', 'latin-1', 'cp1252']:
+            try:
+                text = content.decode(enc)
+                break
+            except UnicodeDecodeError:
+                continue
 
-        dia = fecha.day
+        if not text:
+            text = content.decode('utf-8', errors='ignore')
+
+        dia_actual = fecha.day
+        dia_siguiente = dia_actual + 1
         mes_nombre = MESES[fecha.month - 1]
 
-        # Expresiones regulares adaptadas a las variantes del archivo de texto
-        patrones_dia = [
-            rf"D[ÍI]A\s+{dia}\b",
-            rf"\b{dia}\s+DE\s+{mes_nombre}\b",
-            rf"\b{dia}\s*\.\s*-",
-            rf"\b{dia}\s*\.",
-            rf"^\s*{dia}\b"
-        ]
+        lineas = text.splitlines()
+        capturando = False
+        lineas_extraidas = []
 
-        inc = None
-        for pat in patrones_dia:
-            m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
-            if m:
-                inc = m.end()
-                break
+        for linea in lineas:
+            linea_str = linea.strip()
+            if not linea_str:
+                continue
+            
+            norm = normalizar_texto(linea_str)
 
-        if inc is None:
-            print(f"No se encontró la marca del día {dia} en el texto.")
-            return f"Hoy celebramos las festividades de los santos correspondientes a este día {dia} de {mes_nombre}."
+            # Detecta marcas como "DIA 31", "31 DE AGOSTO", "31.", "31.-"
+            es_hoy = (
+                f"dia {dia_actual}" in norm or 
+                f"{dia_actual} de {mes_nombre}" in norm or 
+                re.search(rf"\b{dia_actual}\s*[\.\-\:]", norm) or
+                norm.startswith(f"{dia_actual} ")
+            )
 
-        # Buscar el inicio del día siguiente (si no es fin de mes)
-        fin = None
-        sig_dia = dia + 1
-        patrones_sig = [
-            rf"D[ÍI]A\s+{sig_dia}\b",
-            rf"\b{sig_dia}\s+DE\s+{mes_nombre}\b",
-            rf"\b{sig_dia}\s*\.\s*-",
-            rf"\b{sig_dia}\s*\.",
-            rf"^\s*{sig_dia}\b"
-        ]
+            # Detecta el inicio del día siguiente para detener la lectura
+            es_siguiente = (
+                f"dia {dia_siguiente}" in norm or 
+                f"{dia_siguiente} de {mes_nombre}" in norm or 
+                re.search(rf"\b{dia_siguiente}\s*[\.\-\:]", norm) or
+                norm.startswith(f"{dia_siguiente} ")
+            )
 
-        for pat in patrones_sig:
-            m_sig = re.search(pat, text[inc:], re.IGNORECASE | re.MULTILINE)
-            if m_sig:
-                fin = inc + m_sig.start()
-                break
+            if capturando:
+                if es_siguiente:
+                    break
+                lineas_extraidas.append(linea_str)
+            else:
+                if es_hoy:
+                    capturando = True
+                    # Extrae el texto tras el número si el titular incluye contenido
+                    sub_linea = re.sub(rf"^(?:D[ÍI]A\s+)?{dia_actual}(?:[A-Z\s]+)?[\.\-\:\s]+", "", linea_str, flags=re.IGNORECASE).strip()
+                    if len(sub_linea) > 10 and not sub_linea.lower().startswith("de "):
+                        lineas_extraidas.append(sub_linea)
 
-        cuerpo = text[inc:fin].strip() if fin else text[inc:].strip()
-        cuerpo = re.sub(r'\s+', ' ', cuerpo)
+        resultado = " ".join(lineas_extraidas).strip()
+        resultado = re.sub(r'\s+', ' ', resultado)
 
-        # Ajuste de longitud para radio si el bloque es muy extenso
-        if len(cuerpo) > 1000:
-            cuerpo = cuerpo[:1000].rsplit('.', 1)[0] + '.'
+        if len(resultado) > 30:
+            if len(resultado) > 950:
+                resultado = resultado[:950].rsplit('.', 1)[0] + '.'
+            return resultado
 
-        return cuerpo if len(cuerpo) > 20 else f"Hoy honramos la memoria de los santos y bienaventurados del día."
+        # Fallback de escaneo global si la lectura por líneas no encuentra separadores estándar
+        norm_full = normalizar_texto(text)
+        pat_start = rf"(?:dia\s+{dia_actual}\b|\b{dia_actual}\s+de\s+{mes_nombre}|\b{dia_actual}\s*[\.\-])"
+        m_start = re.search(pat_start, norm_full)
+        if m_start:
+            idx_start = m_start.end()
+            pat_end = rf"(?:dia\s+{dia_siguiente}\b|\b{dia_siguiente}\s+de\s+{mes_nombre}|\b{dia_siguiente}\s*[\.\-])"
+            m_end = re.search(pat_end, norm_full[idx_start:])
+            
+            bloque = text[idx_start : idx_start + m_end.start()] if m_end else text[idx_start : idx_start + 1200]
+            bloque = re.sub(r'\s+', ' ', bloque).strip()
+            
+            if len(bloque) > 30:
+                if len(bloque) > 950:
+                    bloque = bloque[:950].rsplit('.', 1)[0] + '.'
+                return bloque
 
     except Exception as e:
-        print(f"Error descargando o procesando el santoral: {e}")
-        return "Hoy honramos y recordamos la memoria de los santos de esta jornada."
+        print(f"Error procesando el santoral: {e}")
+
+    return f"En este día honramos y recordamos la memoria de los santos y bienaventurados correspondientes a esta jornada."
 
 async def generar_audio(texto, archivo_salida="santoral-hoy.mp3"):
     try:
