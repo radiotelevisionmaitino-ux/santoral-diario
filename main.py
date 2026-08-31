@@ -21,7 +21,11 @@ MONTH_URLS = {
     12: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20DICIEMBRE.txt",
 }
 
-BG_MUSIC_URL = "https://ia800403.us.archive.org/18/items/maitino-rec-master-1788189527411/MAITINO_REC_MASTER_1788189527411.webm"
+# URLs de la música de fondo (URL canónica + espejo directo)
+BG_MUSIC_URLS = [
+    "https://archive.org/download/maitino-rec-master-1788189527411/MAITINO_REC_MASTER_1788189527411.webm",
+    "https://ia800403.us.archive.org/18/items/maitino-rec-master-1788189527411/MAITINO_REC_MASTER_1788189527411.webm"
+]
 
 INTROS = [
     "Saludos a todos. Hoy es {dia_nombre}, {dia_num} de {mes_nombre} de {anio}, y comenzamos nuestro boletín diario repasando el santoral de la jornada.",
@@ -62,10 +66,10 @@ def obtener_texto_dia(fecha):
             if linea_str.startswith(prefijo):
                 cuerpo = linea_str[len(prefijo):].strip()
 
-                # Control de extensión: recorta elegantemente a un máximo de ~650 caracteres
-                # para asegurar que la locución quepa entre 0:06 y 1:15 sin cortarse.
-                if len(cuerpo) > 650:
-                    sub_c = cuerpo[:650]
+                # Limitar a ~500 caracteres para asegurar que la locución dure ~35s
+                # y sumados los 6s de intro musical + 4s de cierre no supere 1m 15s.
+                if len(cuerpo) > 500:
+                    sub_c = cuerpo[:500]
                     if '.' in sub_c:
                         cuerpo = sub_c.rsplit('.', 1)[0] + '.'
                     else:
@@ -87,58 +91,78 @@ async def generar_audio_voz(texto, archivo_salida="voice_temp.mp3"):
     except Exception as e:
         print(f"Error en voz Edge-TTS: {e}")
 
-def mezclar_audio_con_musica(archivo_voz="voice_temp.mp3", url_musica=BG_MUSIC_URL, archivo_salida="santoral-hoy.mp3"):
-    bg_file = "bg_music.webm"
+def descargar_musica_fondo(archivo_destino="bg_music.webm"):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+    for url in BG_MUSIC_URLS:
+        try:
+            print(f"Intentando descargar música desde: {url}")
+            resp = requests.get(url, headers=headers, timeout=30)
+            if resp.status_code == 200 and len(resp.content) > 1000:
+                with open(archivo_destino, "wb") as f:
+                    f.write(resp.content)
+                print("Música de fondo descargada con éxito.")
+                return True
+        except Exception as e:
+            print(f"Fallo descarga desde {url}: {e}")
+    return False
 
-    # 1. Descargar sintonía de fondo
-    try:
-        print("Descargando música de fondo...")
-        resp = requests.get(url_musica, headers=headers, timeout=30)
-        resp.raise_for_status()
-        with open(bg_file, "wb") as f:
-            f.write(resp.content)
-    except Exception as e:
-        print(f"No se pudo descargar la música de fondo ({e}). Se usará solo la voz.")
+def mezclar_audio_con_musica(archivo_voz="voice_temp.mp3", archivo_salida="santoral-hoy.mp3"):
+    bg_file = "bg_music.webm"
+    
+    if not descargar_musica_fondo(bg_file):
+        print("No se pudo obtener la música de fondo. Se deja solo el audio de voz.")
         if os.path.exists(archivo_voz):
+            if os.path.exists(archivo_salida):
+                os.remove(archivo_salida)
             os.rename(archivo_voz, archivo_salida)
         return
 
-    # 2. Medir duración exacta de la voz
+    # 1. Obtener la duración exacta de la voz
     duracion_voz = 40.0
     try:
         cmd_probe = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprintwrappers=1:nokey=1", archivo_voz]
         res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
         duracion_voz = float(res.stdout.strip())
-        print(f"Duración de la voz: {duracion_voz:.2f} segundos.")
+        print(f"Duración real de la voz: {duracion_voz:.2f} segundos.")
     except Exception as e:
-        print(f"No se pudo medir duración con ffprobe: {e}")
+        print(f"Error obteniendo duración de voz: {e}")
 
-    # 3. Calcular tiempos (Entrada voz: seg 6 | Cierre final: max 75 segs / 1m 15s)
-    duracion_total = min(duracion_voz + 6.0 + 4.0, 75.0)
-    inicio_fade = max(duracion_total - 4.0, duracion_voz + 6.0)
+    # Entrada de voz a los 6s + duración voz + 4s de cola de música
+    duracion_calculada = 6.0 + duracion_voz + 4.0
+    # Límite máximo estricto: 75 segundos (1 minuto 15 segundos)
+    duracion_total = min(duracion_calculada, 75.0)
+    inicio_fade = max(duracion_total - 4.0, 6.0 + duracion_voz)
 
-    # 4. Mezclar con FFmpeg
+    print(f"Duración final del boletín: {duracion_total:.2f}s (Fade out a los {inicio_fade:.2f}s)")
+
+    # 2. Mezcla profesional con FFmpeg
+    filter_complex = (
+        f"[0:a]volume=1.2,adelay=6000|6000[voz];"
+        f"[1:a]volume=0.18[musica];"
+        f"[voz][musica]amix=inputs=2:duration=longest:dropout_transition=2:normalize=0,"
+        f"atrim=0:{duracion_total:.2f},"
+        f"afade=t=out:st={inicio_fade:.2f}:d=4[outa]"
+    )
+
     try:
         cmd_ffmpeg = [
             "ffmpeg", "-y",
             "-i", archivo_voz,
             "-i", bg_file,
-            "-filter_complex",
-            f"[0:a]adelay=delays=6000:all=1[voz_retardada];"
-            f"[1:a]volume=0.22[musica_baja];"
-            f"[musica_baja][voz_retardada]amix=inputs=2:duration=longest:dropout_transition=2,"
-            f"atrim=0:{duracion_total:.2f},"
-            f"afade=t=out:st={inicio_fade:.2f}:d=4[outa]",
+            "-filter_complex", filter_complex,
             "-map", "[outa]",
             "-c:a", "libmp3lame",
             "-b:a", "192k",
             archivo_salida
         ]
-        subprocess.run(cmd_ffmpeg, check=True)
-        print(f"Audio final mezclado con éxito: {archivo_salida} (Duración: {duracion_total:.2f}s)")
+        res = subprocess.run(cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        if res.returncode != 0:
+            print(f"Error en FFmpeg: {res.stderr}")
+            raise Exception("FFmpeg devolvió error")
+            
+        print(f"¡Audio procesado y mezclado con éxito!: {archivo_salida}")
     except Exception as e:
-        print(f"Error en mezcla FFmpeg ({e}). Usando archivo directo de voz.")
+        print(f"Error durante la mezcla: {e}. Se aplica fallback de voz directa.")
         if os.path.exists(archivo_voz):
             if os.path.exists(archivo_salida):
                 os.remove(archivo_salida)
@@ -160,10 +184,9 @@ def main():
 
     texto_audio = f"{intro} {cuerpo} {cierre}"
     
-    # Generar voz y mezclar con sintonía
     archivo_temp_voz = "voice_temp.mp3"
     asyncio.run(generar_audio_voz(texto_audio, archivo_temp_voz))
-    mezclar_audio_con_musica(archivo_temp_voz, BG_MUSIC_URL, "santoral-hoy.mp3")
+    mezclar_audio_con_musica(archivo_temp_voz, "santoral-hoy.mp3")
 
     ts = int(datetime.datetime.now().timestamp())
 
