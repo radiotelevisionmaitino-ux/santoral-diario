@@ -39,25 +39,57 @@ def obtener_texto_dia(fecha):
     try:
         url = MONTH_URLS[fecha.month]
         resp = requests.get(url, timeout=15)
-        resp.encoding = 'utf-8'
+        resp.encoding = resp.apparent_encoding or 'utf-8'
         text = resp.text
 
-        patron_dia = rf"(?:DÍA\s+{fecha.day}\b|\b{fecha.day}\s+DE\s+{MESES[fecha.month-1].upper()})"
-        patron_sig = rf"(?:DÍA\s+{fecha.day+1}\b|\b{fecha.day+1}\s+DE\s+{MESES[fecha.month-1].upper()})"
+        dia = fecha.day
+        mes_nombre = MESES[fecha.month - 1]
 
-        m_inc = re.search(patron_dia, text, re.IGNORECASE)
-        if not m_inc:
-            return "Hoy honramos y recordamos la memoria de los santos y bienaventurados de esta jornada."
+        # Búsqueda ultra flexible de marcas de día (ej: DÍA 31, 31 DE AGOSTO, 31.)
+        patrones_dia = [
+            rf"D[ÍI]A\s+{dia}\b",
+            rf"\b{dia}\s+DE\s+{mes_nombre}\b",
+            rf"\b{dia}\s*\.\s*",
+            rf"^\s*{dia}\b"
+        ]
 
-        inc = m_inc.end()
-        m_sig = re.search(patron_sig, text[inc:], re.IGNORECASE)
+        inc = None
+        for pat in patrones_dia:
+            m = re.search(pat, text, re.IGNORECASE | re.MULTILINE)
+            if m:
+                inc = m.end()
+                break
 
-        cuerpo = text[inc:inc+m_sig.start()].strip() if m_sig else text[inc:].strip()
+        if inc is None:
+            return f"En este día celebramos de manera especial las festividades y santos de esta jornada."
+
+        # Delimitar hasta el día siguiente (si existe)
+        sig_dia = dia + 1
+        patrones_sig = [
+            rf"D[ÍI]A\s+{sig_dia}\b",
+            rf"\b{sig_dia}\s+DE\s+{mes_nombre}\b",
+            rf"\b{sig_dia}\s*\.\s*",
+            rf"^\s*{sig_dia}\b"
+        ]
+
+        fin = None
+        for pat in patrones_sig:
+            m_sig = re.search(pat, text[inc:], re.IGNORECASE | re.MULTILINE)
+            if m_sig:
+                fin = inc + m_sig.start()
+                break
+
+        cuerpo = text[inc:fin].strip() if fin else text[inc:].strip()
         cuerpo = re.sub(r'\s+', ' ', cuerpo)
-        return cuerpo if cuerpo else "Hoy celebramos a los santos correspondiente a esta fecha."
+
+        # Cortar en el último punto si el texto del día fuese excesivamente largo para radio
+        if len(cuerpo) > 900:
+            cuerpo = cuerpo[:900].rsplit('.', 1)[0] + '.'
+
+        return cuerpo if len(cuerpo) > 15 else f"Hoy honramos la memoria de los santos y bienaventurados correspondientes a esta fecha."
     except Exception as e:
         print(f"Error recuperando texto: {e}")
-        return "Hoy honramos la memoria de los santos y bienaventurados del día de hoy."
+        return "Hoy honramos y recordamos la memoria de los santos de esta jornada."
 
 async def generar_audio(texto, archivo_salida="santoral-hoy.mp3"):
     try:
@@ -78,13 +110,10 @@ def main():
 
     texto_audio = f"{intro} {cuerpo} {cierre}"
     
-    # 1. Generar MP3 obligatoriamente
     asyncio.run(generar_audio(texto_audio, "santoral-hoy.mp3"))
 
-    # Timestamp para forzar actualización del reproductor web sin caché
     ts = int(datetime.datetime.now().timestamp())
 
-    # 2. Generar index.html completo
     html = f"""<!DOCTYPE html>
 <html lang="es">
 <head>
