@@ -1,6 +1,8 @@
 import asyncio
 import datetime
+import os
 import random
+import subprocess
 import requests
 import edge_tts
 
@@ -18,6 +20,8 @@ MONTH_URLS = {
     11: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20NOVIEMBRE.txt",
     12: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20DICIEMBRE.txt",
 }
+
+BG_MUSIC_URL = "https://ia800403.us.archive.org/18/items/maitino-rec-master-1788189527411/MAITINO_REC_MASTER_1788189527411.webm"
 
 INTROS = [
     "Saludos a todos. Hoy es {dia_nombre}, {dia_num} de {mes_nombre} de {anio}, y comenzamos nuestro boletín diario repasando el santoral de la jornada.",
@@ -51,14 +55,21 @@ def obtener_texto_dia(fecha):
         if not text:
             text = content.decode('utf-8', errors='ignore')
 
-        # Formato del prefijo exacto en los archivos: [01], [02] ... [31]
         prefijo = f"[{fecha.day:02d}]"
 
         for linea in text.splitlines():
             linea_str = linea.strip()
             if linea_str.startswith(prefijo):
-                # Elimina el [XX] inicial y devuelve todo el texto del día
                 cuerpo = linea_str[len(prefijo):].strip()
+
+                # Control de extensión: recorta elegantemente a un máximo de ~650 caracteres
+                # para asegurar que la locución quepa entre 0:06 y 1:15 sin cortarse.
+                if len(cuerpo) > 650:
+                    sub_c = cuerpo[:650]
+                    if '.' in sub_c:
+                        cuerpo = sub_c.rsplit('.', 1)[0] + '.'
+                    else:
+                        cuerpo = sub_c.rsplit(' ', 1)[0] + '.'
                 return cuerpo
 
         print(f"No se encontró la línea con el prefijo {prefijo}")
@@ -68,13 +79,75 @@ def obtener_texto_dia(fecha):
 
     return "Hoy honramos y recordamos la memoria de los santos de esta jornada."
 
-async def generar_audio(texto, archivo_salida="santoral-hoy.mp3"):
+async def generar_audio_voz(texto, archivo_salida="voice_temp.mp3"):
     try:
         communicate = edge_tts.Communicate(texto, "es-ES-AlvaroNeural")
         await communicate.save(archivo_salida)
-        print("Audio MP3 generado correctamente.")
+        print("Voz TTS generada correctamente.")
     except Exception as e:
         print(f"Error en voz Edge-TTS: {e}")
+
+def mezclar_audio_con_musica(archivo_voz="voice_temp.mp3", url_musica=BG_MUSIC_URL, archivo_salida="santoral-hoy.mp3"):
+    bg_file = "bg_music.webm"
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
+
+    # 1. Descargar sintonía de fondo
+    try:
+        print("Descargando música de fondo...")
+        resp = requests.get(url_musica, headers=headers, timeout=30)
+        resp.raise_for_status()
+        with open(bg_file, "wb") as f:
+            f.write(resp.content)
+    except Exception as e:
+        print(f"No se pudo descargar la música de fondo ({e}). Se usará solo la voz.")
+        if os.path.exists(archivo_voz):
+            os.rename(archivo_voz, archivo_salida)
+        return
+
+    # 2. Medir duración exacta de la voz
+    duracion_voz = 40.0
+    try:
+        cmd_probe = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprintwrappers=1:nokey=1", archivo_voz]
+        res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        duracion_voz = float(res.stdout.strip())
+        print(f"Duración de la voz: {duracion_voz:.2f} segundos.")
+    except Exception as e:
+        print(f"No se pudo medir duración con ffprobe: {e}")
+
+    # 3. Calcular tiempos (Entrada voz: seg 6 | Cierre final: max 75 segs / 1m 15s)
+    duracion_total = min(duracion_voz + 6.0 + 4.0, 75.0)
+    inicio_fade = max(duracion_total - 4.0, duracion_voz + 6.0)
+
+    # 4. Mezclar con FFmpeg
+    try:
+        cmd_ffmpeg = [
+            "ffmpeg", "-y",
+            "-i", archivo_voz,
+            "-i", bg_file,
+            "-filter_complex",
+            f"[0:a]adelay=delays=6000:all=1[voz_retardada];"
+            f"[1:a]volume=0.22[musica_baja];"
+            f"[musica_baja][voz_retardada]amix=inputs=2:duration=longest:dropout_transition=2,"
+            f"atrim=0:{duracion_total:.2f},"
+            f"afade=t=out:st={inicio_fade:.2f}:d=4[outa]",
+            "-map", "[outa]",
+            "-c:a", "libmp3lame",
+            "-b:a", "192k",
+            archivo_salida
+        ]
+        subprocess.run(cmd_ffmpeg, check=True)
+        print(f"Audio final mezclado con éxito: {archivo_salida} (Duración: {duracion_total:.2f}s)")
+    except Exception as e:
+        print(f"Error en mezcla FFmpeg ({e}). Usando archivo directo de voz.")
+        if os.path.exists(archivo_voz):
+            if os.path.exists(archivo_salida):
+                os.remove(archivo_salida)
+            os.rename(archivo_voz, archivo_salida)
+    finally:
+        if os.path.exists(bg_file):
+            os.remove(bg_file)
+        if os.path.exists(archivo_voz):
+            os.remove(archivo_voz)
 
 def main():
     hoy = datetime.date.today()
@@ -87,7 +160,10 @@ def main():
 
     texto_audio = f"{intro} {cuerpo} {cierre}"
     
-    asyncio.run(generar_audio(texto_audio, "santoral-hoy.mp3"))
+    # Generar voz y mezclar con sintonía
+    archivo_temp_voz = "voice_temp.mp3"
+    asyncio.run(generar_audio_voz(texto_audio, archivo_temp_voz))
+    mezclar_audio_con_musica(archivo_temp_voz, BG_MUSIC_URL, "santoral-hoy.mp3")
 
     ts = int(datetime.datetime.now().timestamp())
 
