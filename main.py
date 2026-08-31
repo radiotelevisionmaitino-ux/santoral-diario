@@ -21,7 +21,6 @@ MONTH_URLS = {
     12: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20DICIEMBRE.txt",
 }
 
-# URLs de la música de fondo (URL canónica + espejo directo)
 BG_MUSIC_URLS = [
     "https://archive.org/download/maitino-rec-master-1788189527411/MAITINO_REC_MASTER_1788189527411.webm",
     "https://ia800403.us.archive.org/18/items/maitino-rec-master-1788189527411/MAITINO_REC_MASTER_1788189527411.webm"
@@ -59,24 +58,28 @@ def obtener_texto_dia(fecha):
         if not text:
             text = content.decode('utf-8', errors='ignore')
 
-        prefijo = f"[{fecha.day:02d}]"
+        p1 = f"[{fecha.day:02d}]"
+        p2 = f"[{fecha.day}]"
 
         for linea in text.splitlines():
             linea_str = linea.strip()
-            if linea_str.startswith(prefijo):
-                cuerpo = linea_str[len(prefijo):].strip()
+            if linea_str.startswith(p1):
+                cuerpo = linea_str[len(p1):].strip()
+            elif linea_str.startswith(p2):
+                cuerpo = linea_str[len(p2):].strip()
+            else:
+                continue
 
-                # Limitar a ~500 caracteres para asegurar que la locución dure ~35s
-                # y sumados los 6s de intro musical + 4s de cierre no supere 1m 15s.
-                if len(cuerpo) > 500:
-                    sub_c = cuerpo[:500]
-                    if '.' in sub_c:
-                        cuerpo = sub_c.rsplit('.', 1)[0] + '.'
-                    else:
-                        cuerpo = sub_c.rsplit(' ', 1)[0] + '.'
-                return cuerpo
+            # Limita a ~500 caracteres para asegurar duración adecuada
+            if len(cuerpo) > 500:
+                sub_c = cuerpo[:500]
+                if '.' in sub_c:
+                    cuerpo = sub_c.rsplit('.', 1)[0] + '.'
+                else:
+                    cuerpo = sub_c.rsplit(' ', 1)[0] + '.'
+            return cuerpo
 
-        print(f"No se encontró la línea con el prefijo {prefijo}")
+        print(f"No se encontró coincidencia exacta para el día {fecha.day}")
 
     except Exception as e:
         print(f"Error procesando el santoral: {e}")
@@ -95,53 +98,48 @@ def descargar_musica_fondo(archivo_destino="bg_music.webm"):
     headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
     for url in BG_MUSIC_URLS:
         try:
-            print(f"Intentando descargar música desde: {url}")
+            print(f"Descargando música desde: {url}")
             resp = requests.get(url, headers=headers, timeout=30)
             if resp.status_code == 200 and len(resp.content) > 1000:
                 with open(archivo_destino, "wb") as f:
                     f.write(resp.content)
-                print("Música de fondo descargada con éxito.")
+                print("Música descargada con éxito.")
                 return True
         except Exception as e:
-            print(f"Fallo descarga desde {url}: {e}")
+            print(f"Error al descargar música: {e}")
     return False
 
 def mezclar_audio_con_musica(archivo_voz="voice_temp.mp3", archivo_salida="santoral-hoy.mp3"):
     bg_file = "bg_music.webm"
     
     if not descargar_musica_fondo(bg_file):
-        print("No se pudo obtener la música de fondo. Se deja solo el audio de voz.")
+        print("No se pudo descargar la música de fondo. Usando solo voz.")
         if os.path.exists(archivo_voz):
             if os.path.exists(archivo_salida):
                 os.remove(archivo_salida)
             os.rename(archivo_voz, archivo_salida)
         return
 
-    # 1. Obtener la duración exacta de la voz
     duracion_voz = 40.0
     try:
         cmd_probe = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprintwrappers=1:nokey=1", archivo_voz]
         res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
         duracion_voz = float(res.stdout.strip())
-        print(f"Duración real de la voz: {duracion_voz:.2f} segundos.")
+        print(f"Duración de la voz: {duracion_voz:.2f} s")
     except Exception as e:
-        print(f"Error obteniendo duración de voz: {e}")
+        print(f"Error en ffprobe: {e}")
 
-    # Entrada de voz a los 6s + duración voz + 4s de cola de música
     duracion_calculada = 6.0 + duracion_voz + 4.0
-    # Límite máximo estricto: 75 segundos (1 minuto 15 segundos)
     duracion_total = min(duracion_calculada, 75.0)
     inicio_fade = max(duracion_total - 4.0, 6.0 + duracion_voz)
 
     print(f"Duración final del boletín: {duracion_total:.2f}s (Fade out a los {inicio_fade:.2f}s)")
 
-    # 2. Mezcla profesional con FFmpeg
     filter_complex = (
-        f"[0:a]volume=1.2,adelay=6000|6000[voz];"
+        f"[0:a]volume=1.3,adelay=delays=6000:all=1[voz];"
         f"[1:a]volume=0.18[musica];"
-        f"[voz][musica]amix=inputs=2:duration=longest:dropout_transition=2:normalize=0,"
-        f"atrim=0:{duracion_total:.2f},"
-        f"afade=t=out:st={inicio_fade:.2f}:d=4[outa]"
+        f"[voz][musica]amix=inputs=2:duration=longest:dropout_transition=2[mix];"
+        f"[mix]atrim=0:{duracion_total:.2f},afade=t=out:st={inicio_fade:.2f}:d=4[outa]"
     )
 
     try:
@@ -155,14 +153,10 @@ def mezclar_audio_con_musica(archivo_voz="voice_temp.mp3", archivo_salida="santo
             "-b:a", "192k",
             archivo_salida
         ]
-        res = subprocess.run(cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
-        if res.returncode != 0:
-            print(f"Error en FFmpeg: {res.stderr}")
-            raise Exception("FFmpeg devolvió error")
-            
-        print(f"¡Audio procesado y mezclado con éxito!: {archivo_salida}")
+        res = subprocess.run(cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        print(f"Mezcla final generada con éxito: {archivo_salida}")
     except Exception as e:
-        print(f"Error durante la mezcla: {e}. Se aplica fallback de voz directa.")
+        print(f"Error en FFmpeg: {e}")
         if os.path.exists(archivo_voz):
             if os.path.exists(archivo_salida):
                 os.remove(archivo_salida)
