@@ -21,11 +21,6 @@ MONTH_URLS = {
     12: "https://archive.org/download/santoral-diciembre/SANTORALES%20TEXTO/SANTORAL%20DICIEMBRE.txt",
 }
 
-BG_MUSIC_URLS = [
-    "https://archive.org/download/maitino-rec-master-1788189527411/MAITINO_REC_MASTER_1788189527411.webm",
-    "https://ia800403.us.archive.org/18/items/maitino-rec-master-1788189527411/MAITINO_REC_MASTER_1788189527411.webm"
-]
-
 INTROS = [
     "Saludos a todos. Hoy es {dia_nombre}, {dia_num} de {mes_nombre} de {anio}, y comenzamos nuestro boletín diario repasando el santoral de la jornada.",
     "Muy buenos días. En este {dia_nombre}, {dia_num} de {mes_nombre} del año {anio}, abrimos el espacio dedicado a la memoria de los santos que la Iglesia honra hoy.",
@@ -70,7 +65,7 @@ def obtener_texto_dia(fecha):
             else:
                 continue
 
-            # Limita a ~500 caracteres para asegurar duración adecuada
+            # Ajuste de longitud base a ~500 caracteres
             if len(cuerpo) > 500:
                 sub_c = cuerpo[:500]
                 if '.' in sub_c:
@@ -79,7 +74,7 @@ def obtener_texto_dia(fecha):
                     cuerpo = sub_c.rsplit(' ', 1)[0] + '.'
             return cuerpo
 
-        print(f"No se encontró coincidencia exacta para el día {fecha.day}")
+        print(f"No se encontró coincidencia para el día {fecha.day}")
 
     except Exception as e:
         print(f"Error procesando el santoral: {e}")
@@ -94,76 +89,58 @@ async def generar_audio_voz(texto, archivo_salida="voice_temp.mp3"):
     except Exception as e:
         print(f"Error en voz Edge-TTS: {e}")
 
-def descargar_musica_fondo(archivo_destino="bg_music.webm"):
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    for url in BG_MUSIC_URLS:
-        try:
-            print(f"Descargando música desde: {url}")
-            resp = requests.get(url, headers=headers, timeout=30)
-            if resp.status_code == 200 and len(resp.content) > 1000:
-                with open(archivo_destino, "wb") as f:
-                    f.write(resp.content)
-                print("Música descargada con éxito.")
-                return True
-        except Exception as e:
-            print(f"Error al descargar música: {e}")
-    return False
-
-def mezclar_audio_con_musica(archivo_voz="voice_temp.mp3", archivo_salida="santoral-hoy.mp3"):
-    bg_file = "bg_music.webm"
-    
-    if not descargar_musica_fondo(bg_file):
-        print("No se pudo descargar la música de fondo. Usando solo voz.")
-        if os.path.exists(archivo_voz):
-            if os.path.exists(archivo_salida):
-                os.remove(archivo_salida)
-            os.rename(archivo_voz, archivo_salida)
-        return
-
-    duracion_voz = 40.0
+def procesar_audio_60s(archivo_voz="voice_temp.mp3", archivo_salida="santoral-hoy.mp3"):
+    # Medir duración exacta de la voz
+    duracion_voz = 45.0
     try:
         cmd_probe = ["ffprobe", "-v", "error", "-show_entries", "format=duration", "-of", "default=noprintwrappers=1:nokey=1", archivo_voz]
         res = subprocess.run(cmd_probe, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
         duracion_voz = float(res.stdout.strip())
-        print(f"Duración de la voz: {duracion_voz:.2f} s")
+        print(f"Duración original de la voz: {duracion_voz:.2f} s")
     except Exception as e:
-        print(f"Error en ffprobe: {e}")
+        print(f"Error midiendo duración: {e}")
 
-    duracion_calculada = 6.0 + duracion_voz + 4.0
-    duracion_total = min(duracion_calculada, 75.0)
-    inicio_fade = max(duracion_total - 4.0, 6.0 + duracion_voz)
+    # Estructura temporal rígida:
+    # Arpegio Entrada: 2.5s | Bloque de Voz: 55.0s | Arpegio Salida: 2.5s = 60.0s Total
+    duracion_voz_objetivo = 55.0
+    
+    # Calcular factor de tiempo manteniéndolo entre 0.85 (más lento) y 1.25 (más rápido)
+    factor = duracion_voz / duracion_voz_objetivo
+    factor_clamped = max(0.85, min(1.25, factor))
+    
+    duracion_voz_ajustada = duracion_voz / factor_clamped
+    pad_silencio = max(0.0, duracion_voz_objetivo - duracion_voz_ajustada)
 
-    print(f"Duración final del boletín: {duracion_total:.2f}s (Fade out a los {inicio_fade:.2f}s)")
+    # Expresiones sintéticas para el Arpegio Fa (349.23 Hz) - Do (523.25 Hz) "Amén"
+    intro_expr = "if(lt(t,0.6),0.2*sin(2*PI*349.23*t),0.15*sin(2*PI*349.23*t)+0.15*sin(2*PI*523.25*t))"
+    outro_expr = "if(lt(t,0.6),0.2*sin(2*PI*523.25*t),0.15*sin(2*PI*349.23*t)+0.15*sin(2*PI*523.25*t))"
 
     filter_complex = (
-        f"[0:a]volume=1.3,adelay=delays=6000:all=1[voz];"
-        f"[1:a]volume=0.18[musica];"
-        f"[voz][musica]amix=inputs=2:duration=longest:dropout_transition=2[mix];"
-        f"[mix]atrim=0:{duracion_total:.2f},afade=t=out:st={inicio_fade:.2f}:d=4[outa]"
+        f"aevalsrc='{intro_expr}':s=44100:d=2.5,afade=t=in:st=0:d=0.2,afade=t=out:st=1.8:d=0.7[intro];"
+        f"aevalsrc='{outro_expr}':s=44100:d=2.5,afade=t=in:st=0:d=0.2,afade=t=out:st=1.5:d=1.0[outro];"
+        f"[0:a]atempo={factor_clamped:.4f},apad=pad_dur={pad_silencio:.2f},atrim=0:55.0[voz];"
+        f"[intro][voz][outro]concat=n=3:v=0:a=1[outa]"
     )
 
     try:
         cmd_ffmpeg = [
             "ffmpeg", "-y",
             "-i", archivo_voz,
-            "-i", bg_file,
             "-filter_complex", filter_complex,
             "-map", "[outa]",
             "-c:a", "libmp3lame",
             "-b:a", "192k",
             archivo_salida
         ]
-        res = subprocess.run(cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
-        print(f"Mezcla final generada con éxito: {archivo_salida}")
+        subprocess.run(cmd_ffmpeg, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, check=True)
+        print(f"Boletín de 60s exactos generado con éxito: {archivo_salida}")
     except Exception as e:
-        print(f"Error en FFmpeg: {e}")
+        print(f"Error procesando audio final: {e}")
         if os.path.exists(archivo_voz):
             if os.path.exists(archivo_salida):
                 os.remove(archivo_salida)
             os.rename(archivo_voz, archivo_salida)
     finally:
-        if os.path.exists(bg_file):
-            os.remove(bg_file)
         if os.path.exists(archivo_voz):
             os.remove(archivo_voz)
 
@@ -180,7 +157,7 @@ def main():
     
     archivo_temp_voz = "voice_temp.mp3"
     asyncio.run(generar_audio_voz(texto_audio, archivo_temp_voz))
-    mezclar_audio_con_musica(archivo_temp_voz, "santoral-hoy.mp3")
+    procesar_audio_60s(archivo_temp_voz, "santoral-hoy.mp3")
 
     ts = int(datetime.datetime.now().timestamp())
 
